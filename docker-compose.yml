@@ -1,0 +1,48 @@
+version: '3.9'
+
+services:
+  backend-claims:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      SERVICE_NAME: backend-claims-service
+      LOG_STACK: "false"
+      AUTH_JWT_SECRET: "change-me"
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: claims
+      DB_SSL: "false"
+    depends_on:
+      - db
+      - redis
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: claims
+    volumes:
+      - backend-claims-db:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - backend-claims-redis:/data
+
+volumes:
+  backend-claims-db:
+  backend-claims-redis:

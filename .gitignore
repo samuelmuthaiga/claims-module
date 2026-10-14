@@ -1,0 +1,17 @@
+node_modules
+dist
+coverage
+.env
+.env.local
+.env.prod
+.env.development
+.env.production
+.env.test
+.env.test.local
+/logs
+tmp
+.DS_Store
+*.log
+coverage/
+docs/
+.vscode/
