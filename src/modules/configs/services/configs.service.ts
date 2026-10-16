@@ -1,252 +1,222 @@
-import {
-  BadRequestException,
-  Injectable,
-  NotFoundException,
-  Optional,
-} from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { FormConfig } from '../entities/config.entity';
-import { CLAIM_FORM_CONFIGS } from '../data/claim-form-configs.data';
-import { ConfigMetadataValidator } from './config-metadata.validator';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { createHash } from 'crypto';
+import { AuthUser } from '../../../auth/interfaces/auth-user.interface';
+import { ClaimsException, ErrorCode } from '../../../common/exceptions/claims.exception';
+import { AuditService } from '../../audit-logs/services/audit.service';
+import { DEFAULT_CONFIGS } from '../data';
+import { DEFAULT_SETTINGS } from '../data/settings.config';
+import { DEFAULT_WORKFLOW } from '../data/workflow.config';
 import { CreateConfigDto } from '../dto/create-config.dto';
+import { ConfigResponseDto } from '../dto/config.dto';
 import { UpdateConfigDto } from '../dto/update-config.dto';
-import { FormConfigResponseDto } from '../dto/config.dto';
-import { SubmitConfigValuesResponseDto } from '../dto/submit-config-values.dto';
+import {
+  ClaimsSettings, ConfigDefinition, ConfigSeed, ConfigType, WorkflowDefinition,
+} from '../types/config.types';
+import { ConfigContextService } from './config-context.service';
+import { ConfigMetadataValidator, ValidationResult } from './config-metadata.validator';
 
-type MockConfig = Record<string, any>;
+const hash = (input: string): string => createHash('sha1').update(input).digest('hex').slice(0, 16);
 
 /**
- * Serves form configurations to the UI. Follows the codebase's standard
- * pattern: repository-first with an in-memory fallback so the UI works
- * before the claims database exists.
+ * Registry of UI configurations (forms, filter bars, tables, workflow,
+ * settings). Held in memory and seeded from `data/` until the claims DB
+ * exists; `entities/config.entity.ts` is the table it moves to. Every seed is
+ * schema-validated at boot, so a broken default fails the deploy, not a user.
  */
 @Injectable()
-export class ConfigsService {
-  /** In-memory store; seeded with the Claims UI form definitions. */
-  private mockConfigs: MockConfig[] = CLAIM_FORM_CONFIGS.map((c) => ({
-    ...c,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  }));
+export class ConfigsService implements OnModuleInit {
+  private readonly logger = new Logger(ConfigsService.name);
+  private readonly registry = new Map<string, ConfigDefinition>();
 
   constructor(
-    @Optional() @InjectRepository(FormConfig)
-    private readonly configRepository: Repository<FormConfig>,
     private readonly validator: ConfigMetadataValidator,
+    private readonly contextService: ConfigContextService,
+    private readonly audit: AuditService,
   ) {}
 
-  private toResponse(config: MockConfig): FormConfigResponseDto {
-    return {
-      id: config.id,
-      key: config.key,
-      title: config.title,
-      description: config.description ?? null,
-      domain: config.domain ?? 'claims',
-      metaData: config.metaData,
-      actions: config.actions ?? null,
-      isActive: config.isActive ?? true,
-      version: config.version ?? 1,
-      createdAt: config.createdAt,
-      updatedAt: config.updatedAt,
-    };
-  }
-
-  private entityToResponse(entity: FormConfig): FormConfigResponseDto {
-    return {
-      id: entity.id,
-      key: entity.key,
-      title: entity.title,
-      description: entity.description,
-      domain: entity.domain,
-      metaData: entity.metaData,
-      actions: entity.actions,
-      isActive: entity.isActive,
-      version: entity.version,
-      createdAt: entity.createdAt,
-      updatedAt: entity.updatedAt,
-    };
-  }
-
-  async findAll(domain?: string): Promise<FormConfigResponseDto[]> {
-    try {
-      const where = domain ? { domain } : {};
-      const entities = await this.configRepository.find({ where });
-      if (entities.length) {
-        return entities.map((entity) => this.entityToResponse(entity));
+  onModuleInit(): void {
+    const formKeys = new Set(DEFAULT_CONFIGS.filter((c) => c.type === 'FORM').map((c) => c.key));
+    for (const seed of DEFAULT_CONFIGS) {
+      const result = this.validator.validateConfigSchema(seed.type, seed.metaData, formKeys);
+      if (!result.ok) {
+        throw new Error(
+          `Invalid default config '${seed.key}': ${result.errors.map((e) => `${e.key}: ${e.message}`).join('; ')}`,
+        );
       }
-    } catch {
-      // DB unavailable — fall through to mock configs.
+      this.registry.set(this.slot(seed.key, seed.country ?? '*'), this.build(seed, 1));
     }
+    this.logger.log(`Loaded ${this.registry.size} default configs`);
+  }
 
-    return this.mockConfigs
-      .filter((c) => !domain || c.domain === domain)
+  // ───────────────────────────── reads ─────────────────────────────
+
+  list(filter: { type?: string; domain?: string; country?: string } = {}): ConfigResponseDto[] {
+    return this.active()
+      .filter((c) => (!filter.type || c.type === filter.type) && (!filter.domain || c.domain === filter.domain))
+      .filter((c) => !filter.country || c.country === '*' || c.country === filter.country)
       .map((c) => this.toResponse(c));
   }
 
-  /**
-   * Fetch a form config by key. `context` (entityType/entityId/country/etc.)
-   * is merged in so the UI can resolve {{context.*}} placeholders and the
-   * server can evaluate context-keyed constraints on submit.
-   */
-  async findByKey(
+  get(
     key: string,
-    context: Record<string, unknown> = {},
-  ): Promise<FormConfigResponseDto> {
-    try {
-      const entity = await this.configRepository.findOne({ where: { key } });
-      if (entity) {
-        const response = this.entityToResponse(entity);
-        if (Object.keys(context).length) response.context = context;
-        return response;
-      }
-    } catch {
-      // DB unavailable — fall through to mock configs.
-    }
-
-    const config = this.mockConfigs.find((c) => c.key === key);
-    if (!config) {
-      throw new NotFoundException(`Form config '${key}' not found`);
-    }
-
+    options: { country?: string; entityType?: string; entityId?: string } = {},
+  ): ConfigResponseDto {
+    const config = this.find(key, options.country);
     const response = this.toResponse(config);
-    if (Object.keys(context).length) response.context = context;
+    if (options.entityType) {
+      const { context, initialValues } = this.contextService.resolve(key, options.entityType, options.entityId);
+      response.context = context;
+      response.initialValues = initialValues;
+    }
     return response;
   }
 
-  async create(dto: CreateConfigDto): Promise<FormConfigResponseDto> {
-    const schemaResult = this.validator.validateConfigSchema(dto.metaData);
-    if (!schemaResult.ok) {
-      throw new BadRequestException({
-        message: 'Invalid meta_data schema',
-        errors: schemaResult.errors,
-      });
-    }
-
-    if (this.mockConfigs.some((c) => c.key === dto.key)) {
-      throw new BadRequestException(
-        `A config with key '${dto.key}' already exists`,
-      );
-    }
-
-    const config: MockConfig = {
-      id: `cfg-${dto.key}`,
-      key: dto.key,
-      title: dto.title,
-      description: dto.description ?? null,
-      domain: dto.domain ?? 'claims',
-      metaData: dto.metaData,
-      actions: dto.actions ?? null,
-      isActive: dto.isActive ?? true,
-      version: 1,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+  bootstrap(country?: string): { etag: string; generatedAt: string; configs: ConfigResponseDto[] } {
+    const configs = this.list({ country }).filter((c) => c.country === '*' || c.country === country);
+    // Country-specific entries replace the global entry of the same key.
+    const byKey = new Map<string, ConfigResponseDto>();
+    configs.forEach((c) => {
+      if (!byKey.has(c.key) || c.country !== '*') byKey.set(c.key, c);
+    });
+    const selected = [...byKey.values()].sort((a, b) => a.key.localeCompare(b.key));
+    return {
+      etag: hash(selected.map((c) => c.etag).join('|')),
+      generatedAt: new Date().toISOString(),
+      configs: selected,
     };
-
-    try {
-      const entity = this.configRepository.create({
-        key: config.key,
-        title: config.title,
-        description: config.description,
-        domain: config.domain,
-        metaData: config.metaData,
-        actions: config.actions,
-        isActive: config.isActive,
-      });
-      await this.configRepository.save(entity);
-      return this.entityToResponse(entity);
-    } catch {
-      // DB unavailable — keep the config in the mock store.
-    }
-
-    this.mockConfigs.push(config);
-    return this.toResponse(config);
   }
 
-  async update(
-    key: string,
-    dto: UpdateConfigDto,
-  ): Promise<FormConfigResponseDto> {
-    if (dto.metaData) {
-      const schemaResult = this.validator.validateConfigSchema(dto.metaData);
-      if (!schemaResult.ok) {
-        throw new BadRequestException({
-          message: 'Invalid meta_data schema',
-          errors: schemaResult.errors,
-        });
-      }
-    }
+  getEtag(): string {
+    return this.bootstrap().etag;
+  }
 
-    try {
-      const entity = await this.configRepository.findOne({ where: { key } });
-      if (entity) {
-        if (dto.title !== undefined) entity.title = dto.title;
-        if (dto.description !== undefined) entity.description = dto.description;
-        if (dto.metaData !== undefined) entity.metaData = dto.metaData;
-        if (dto.actions !== undefined) entity.actions = dto.actions;
-        if (dto.isActive !== undefined) entity.isActive = dto.isActive;
-        entity.version = (entity.version ?? 1) + 1;
-        await this.configRepository.save(entity);
-        return this.entityToResponse(entity);
-      }
-    } catch {
-      // DB unavailable — fall through to mock configs.
-    }
+  getSettings(): ClaimsSettings {
+    const stored = this.registry.get(this.slot('claims-settings', '*'))?.metaData as Partial<ClaimsSettings> | undefined;
+    return { ...DEFAULT_SETTINGS, ...stored };
+  }
 
-    const index = this.mockConfigs.findIndex((c) => c.key === key);
-    if (index === -1) {
-      throw new NotFoundException(`Form config '${key}' not found`);
-    }
+  getWorkflow(): WorkflowDefinition {
+    return (this.registry.get(this.slot('claim-workflow', '*'))?.metaData as unknown as WorkflowDefinition) ?? DEFAULT_WORKFLOW;
+  }
 
-    const existing = this.mockConfigs[index]!;
-    this.mockConfigs[index] = {
-      ...existing,
-      ...(dto.title !== undefined && { title: dto.title }),
-      ...(dto.description !== undefined && { description: dto.description }),
-      ...(dto.metaData !== undefined && { metaData: dto.metaData }),
-      ...(dto.actions !== undefined && { actions: dto.actions }),
-      ...(dto.isActive !== undefined && { isActive: dto.isActive }),
-      version: (existing.version ?? 1) + 1,
-      updatedAt: new Date().toISOString(),
-    };
+  // ───────────────────────────── validation ─────────────────────────────
 
-    return this.toResponse(this.mockConfigs[index]);
+  /** Dry-run validation of form values (what the UI calls before submitting). */
+  validate(key: string, values: Record<string, unknown>, context: Record<string, unknown> = {}): ValidationResult {
+    const config = this.find(key);
+    return this.validator.validateAndApplyConfigMeta(config.metaData, values, context);
   }
 
   /**
-   * Validates submitted values against the config's metaData and returns the
-   * result in Fleetzen's submit contract — { ok, errors[], metaData } — so the
-   * UI can map errors onto fields the same way mapSubmissionErrors does.
+   * Validates an API payload against its form config and throws a
+   * `422 VALIDATION_FAILED` with field-keyed errors. UI-only (`transient`)
+   * fields are ignored, so the config stays the single source of validation
+   * rules for both the form and the endpoint it posts to.
    */
-  async submitValues(
-    key: string,
-    values: Record<string, unknown>,
-    context: Record<string, unknown> = {},
-  ): Promise<SubmitConfigValuesResponseDto> {
-    const config = await this.findByKey(key);
+  assertValid(key: string, payload: Record<string, unknown>, context: Record<string, unknown> = {}): void {
+    const config = this.find(key);
+    const result = this.validator.validateAndApplyConfigMeta(config.metaData, payload, context, { skipTransient: true });
+    if (!result.ok) throw ClaimsException.validation(result.errors);
+  }
 
-    if (!config.isActive) {
-      throw new BadRequestException(`Form config '${key}' is not active`);
+  // ───────────────────────────── writes ─────────────────────────────
+
+  create(dto: CreateConfigDto, actor?: AuthUser): ConfigResponseDto {
+    const country = dto.country ?? '*';
+    const slot = this.slot(dto.key, country);
+    if (this.registry.has(slot)) {
+      throw ClaimsException.conflict(ErrorCode.INVALID_TRANSITION, `A config with key '${dto.key}' already exists for country '${country}'`);
     }
+    this.assertSchema(dto.type, dto.metaData);
 
-    const result = this.validator.validateAndApplyConfigMeta(
-      config.metaData,
-      values,
-      context,
+    const config = this.build(
+      { key: dto.key, type: dto.type, title: dto.title, description: dto.description, domain: dto.domain ?? 'claims', country, metaData: dto.metaData, actions: dto.actions as unknown as ConfigSeed['actions'] },
+      1,
+      dto.isActive ?? true,
     );
+    this.registry.set(slot, config);
+    this.audit.record(
+      { module: 'CONFIGS', action: 'CONFIG_CREATED', entityType: 'config', entityId: config.key, details: `Created ${config.type} config '${config.key}'`, after: { version: 1 } },
+      actor,
+    );
+    return this.toResponse(config);
+  }
 
-    return {
-      ok: result.ok,
-      errors: result.errors,
-      metaData: result.metaData,
-      submission: result.ok
-        ? {
-            configKey: key,
-            values,
-            context,
-            submittedAt: new Date().toISOString(),
-          }
-        : undefined,
+  update(key: string, dto: UpdateConfigDto, country = '*', actor?: AuthUser): ConfigResponseDto {
+    const slot = this.slot(key, country);
+    const existing = this.registry.get(slot);
+    if (!existing) throw ClaimsException.notFound('Config', key);
+    if (dto.metaData) this.assertSchema(existing.type, dto.metaData);
+
+    const next: ConfigDefinition = {
+      ...existing,
+      title: dto.title ?? existing.title,
+      description: dto.description ?? existing.description,
+      metaData: dto.metaData ?? existing.metaData,
+      actions: (dto.actions as unknown as ConfigDefinition['actions']) ?? existing.actions,
+      isActive: dto.isActive ?? existing.isActive,
+      version: existing.version + 1,
+      updatedAt: new Date().toISOString(),
     };
+    next.etag = this.etagOf(next);
+    this.registry.set(slot, next);
+    this.audit.record(
+      { module: 'CONFIGS', action: 'CONFIG_UPDATED', entityType: 'config', entityId: key, details: `Updated config '${key}' to v${next.version}`, before: { version: existing.version, etag: existing.etag }, after: { version: next.version, etag: next.etag } },
+      actor,
+    );
+    return this.toResponse(next);
+  }
+
+  // ───────────────────────────── internals ─────────────────────────────
+
+  private assertSchema(type: ConfigType, metaData: Record<string, unknown>): void {
+    const formKeys = new Set([...this.registry.values()].filter((c) => c.type === 'FORM').map((c) => c.key));
+    const result = this.validator.validateConfigSchema(type, metaData, formKeys);
+    if (!result.ok) throw ClaimsException.validation(result.errors, 'Invalid config metaData schema');
+  }
+
+  private find(key: string, country?: string): ConfigDefinition {
+    const config =
+      (country ? this.registry.get(this.slot(key, country)) : undefined) ?? this.registry.get(this.slot(key, '*'));
+    if (!config || !config.isActive) throw ClaimsException.notFound('Config', key);
+    return config;
+  }
+
+  private active(): ConfigDefinition[] {
+    return [...this.registry.values()].filter((c) => c.isActive);
+  }
+
+  private slot(key: string, country: string): string {
+    return `${key}|${country}`;
+  }
+
+  private etagOf(config: Pick<ConfigDefinition, 'key' | 'version' | 'metaData' | 'actions'>): string {
+    return hash(`${config.key}:${config.version}:${JSON.stringify(config.metaData)}:${JSON.stringify(config.actions)}`);
+  }
+
+  private build(seed: ConfigSeed, version: number, isActive = true): ConfigDefinition {
+    const now = new Date().toISOString();
+    const config: ConfigDefinition = {
+      id: `cfg-${seed.key}`,
+      key: seed.key,
+      type: seed.type,
+      title: seed.title,
+      description: seed.description ?? null,
+      domain: seed.domain,
+      country: seed.country ?? '*',
+      metaData: seed.metaData,
+      actions: seed.actions ?? null,
+      isActive,
+      version,
+      etag: '',
+      createdAt: now,
+      updatedAt: now,
+    };
+    config.etag = this.etagOf(config);
+    return config;
+  }
+
+  private toResponse(config: ConfigDefinition): ConfigResponseDto {
+    return { ...config, metaData: JSON.parse(JSON.stringify(config.metaData)) };
   }
 }

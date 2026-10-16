@@ -1,15 +1,14 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
-import { DB_ENABLED } from '../../config/database.config';
+import { AuditLogsModule } from '../audit-logs/audit-logs.module';
 import { ConfigsController } from './controllers/configs.controller';
-import { ConfigsService } from './services/configs.service';
+import { ConfigContextService } from './services/config-context.service';
 import { ConfigMetadataValidator } from './services/config-metadata.validator';
-import { FormConfig } from './entities/config.entity';
+import { ConfigsService } from './services/configs.service';
 
 @Module({
-  imports: [TypeOrmModule.forFeature(DB_ENABLED ? [FormConfig] : [])],
+  imports: [AuditLogsModule],
   controllers: [ConfigsController],
-  providers: [ConfigsService, ConfigMetadataValidator],
-  exports: [ConfigsService, ConfigMetadataValidator],
+  providers: [ConfigsService, ConfigContextService, ConfigMetadataValidator],
+  exports: [ConfigsService, ConfigContextService, ConfigMetadataValidator],
 })
 export class ConfigsModule {}

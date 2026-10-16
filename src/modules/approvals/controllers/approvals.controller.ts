@@ -1,52 +1,57 @@
-import { Controller, Get, Post, Body, Param, Query } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
+import { Body, Controller, Get, HttpCode, Param, ParseIntPipe, Post, Query } from '@nestjs/common';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Permission } from '../../../auth/constants/permissions';
+import { CurrentUser } from '../../../auth/decorators/current-user.decorator';
+import { RequirePermissions } from '../../../auth/decorators/require-permissions.decorator';
+import { AuthUser } from '../../../auth/interfaces/auth-user.interface';
+import { ApiAuth } from '../../../common/decorators/api-auth.decorator';
+import { ApiOkEnvelope } from '../../../common/decorators/api-response.decorator';
+import { ApiMutationHeaders, IfMatchVersion } from '../../../common/decorators/concurrency.decorator';
+import { ApprovalDecisionDto, ListApprovalsQueryDto } from '../dto/approvals.dto';
 import { ApprovalsService } from '../services/approvals.service';
-import { ApprovalResponseDto, ApprovalSummaryResponseDto, ApprovalDecisionDto } from '../dto/approval.dto';
-import { PaginationDto } from '../../../common/dto/pagination.dto';
-import { ResponseDto } from '../../../common/dto/response.dto';
 
 @ApiTags('approvals')
+@ApiAuth()
 @Controller('v1/approvals')
 export class ApprovalsController {
-  constructor(private readonly approvalsService: ApprovalsService) {}
+  constructor(private readonly approvals: ApprovalsService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List approvals' })
-  @ApiResponse({ status: 200, description: 'Returns paginated list of approvals' })
-  @ApiQuery({ name: 'page', required: false, type: Number })
-  @ApiQuery({ name: 'limit', required: false, type: Number })
-  async findAll(@Query() pagination: PaginationDto): Promise<ResponseDto<ApprovalResponseDto[]>> {
-    const { page = 1, limit = 10 } = pagination;
-    return await this.approvalsService.findAll(page, limit);
+  @RequirePermissions(Permission.REVIEWS_READ)
+  @ApiOperation({ summary: 'Approval queue for one type (pending by default)' })
+  @ApiOkEnvelope('Paginated approvals')
+  list(@Query() query: ListApprovalsQueryDto) {
+    return this.approvals.list(query);
   }
 
   @Get('summary')
-  @ApiOperation({ summary: 'Get approvals summary' })
-  @ApiResponse({ status: 200, description: 'Returns approval summary counts' })
-  async getSummary(): Promise<ResponseDto<ApprovalSummaryResponseDto>> {
-    return {
-      data: await this.approvalsService.getSummary(),
-    };
+  @RequirePermissions(Permission.REVIEWS_READ)
+  @ApiOperation({ summary: 'Pending counts per approval type' })
+  @ApiOkEnvelope('Summary')
+  summary() {
+    return this.approvals.summary();
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Get approval detail' })
-  @ApiResponse({ status: 200, description: 'Returns detailed approval information' })
-  async findOne(@Param('id') id: string): Promise<ResponseDto<ApprovalResponseDto>> {
-    return {
-      data: await this.approvalsService.findOne(Number(id)),
-    };
+  @RequirePermissions(Permission.REVIEWS_READ)
+  @ApiOperation({ summary: 'Approval detail (shape depends on type) with the caller’s decision state' })
+  @ApiOkEnvelope('Approval detail')
+  get(@Param('id', new ParseIntPipe({ errorHttpStatusCode: 422 })) id: number, @CurrentUser() user: AuthUser) {
+    return this.approvals.get(id, user);
   }
 
   @Post(':id/decision')
-  @ApiOperation({ summary: 'Submit approval decision' })
-  @ApiResponse({ status: 200, description: 'Decision submitted successfully' })
-  async submitDecision(
-    @Param('id') id: string,
-    @Body() decisionDto: ApprovalDecisionDto,
-  ): Promise<ResponseDto<ApprovalResponseDto>> {
-    return {
-      data: await this.approvalsService.submitDecision(Number(id), decisionDto),
-    };
+  @HttpCode(200)
+  @RequirePermissions(Permission.REVIEWS_APPROVE)
+  @ApiOperation({ summary: 'Approve or decline (maker-checker enforced; decline needs a reason)' })
+  @ApiMutationHeaders()
+  @ApiOkEnvelope('Decision recorded')
+  decide(
+    @Param('id', new ParseIntPipe({ errorHttpStatusCode: 422 })) id: number,
+    @Body() dto: ApprovalDecisionDto,
+    @CurrentUser() user: AuthUser,
+    @IfMatchVersion() ifMatch?: number,
+  ) {
+    return this.approvals.decide(id, dto, user, ifMatch);
   }
 }

@@ -1,15 +1,12 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
-import { DB_ENABLED } from '../../config/database.config';
+import { AuditLogsModule } from '../audit-logs/audit-logs.module';
+import { ClaimWorkflowModule } from '../claim-workflow/claim-workflow.module';
+import { ConfigsModule } from '../configs/configs.module';
 import { ClaimsController } from './controllers/claims.controller';
 import { ClaimsService } from './services/claims.service';
-import { Claim } from './entities/claim.entity';
-import { ClaimStatusHistory } from './entities/claim-status-history.entity';
 
 @Module({
-  imports: [
-    TypeOrmModule.forFeature(DB_ENABLED ? [Claim, ClaimStatusHistory] : []),
-  ],
+  imports: [ClaimWorkflowModule, ConfigsModule, AuditLogsModule],
   controllers: [ClaimsController],
   providers: [ClaimsService],
   exports: [ClaimsService],

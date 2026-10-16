@@ -1,143 +1,87 @@
 import { Injectable } from '@nestjs/common';
-import { CarLookupDto, EnumDto, CountryDto, VendorDto } from '../dto/lookup.dto';
+import { paginate } from '../../../common/utils/paginate.util';
+import { includesText } from '../../../common/utils/query.util';
+import { carEligibility } from '../../../domain/eligibility';
+import { ENUMS } from '../../../domain/enums';
+import { MockDataStore } from '../../../store/mock-data.store';
+import { STATES } from '../../../store/seed/reference-data';
+import { ConfigsService } from '../../configs/services/configs.service';
+import { CarSearchQueryDto, CitiesQueryDto, SearchTypesQueryDto, StatesQueryDto, VendorsQueryDto } from '../dto/lookups-query.dto';
+
+const flag = (code: string): string =>
+  [...code.toUpperCase()].map((c) => String.fromCodePoint(0x1f1e6 + c.charCodeAt(0) - 65)).join('');
 
 @Injectable()
 export class LookupsService {
-  private mockCars: CarLookupDto[] = [
-    {
-      value: 'car-991',
-      label: '2021 Toyota Camry · KJA-123AA',
-      email: 'jane.doe@example.com',
-      car: {
-        id: 'car-991',
-        loanId: 'loan-123',
-        acquireId: 'acq-456',
-        warrantyId: 'warranty-789',
-        vin: '4T1B11HK5MU123456',
-        plateNumber: 'KJA-123AA',
-        make: 'Toyota',
-        model: 'Camry',
-        year: 2021,
-        price: 2500000,
-        currency: 'NGN',
-        customerId: 'cust-882',
-      },
-      customer: {
-        id: 'cust-882',
-        name: 'Jane Doe',
-        email: 'jane.doe@example.com',
-        phone: '+2348012345678',
-      },
-      eligibility: {
-        warranty: { eligible: true, reason: null },
-        repairs: { eligible: true, reason: null },
-        insurance: { eligible: false, reason: 'No active insurance policy' },
-      },
-    },
-  ];
+  constructor(
+    private readonly store: MockDataStore,
+    private readonly configs: ConfigsService,
+  ) {}
 
-  private mockEnums: Record<string, EnumDto[]> = {
-    claimType: [
-      { code: 'WARRANTY', label: 'Warranty', description: 'Warranty claims' },
-      { code: 'REPAIRS', label: 'Repairs', description: 'Repair claims' },
-      { code: 'INSURANCE', label: 'Insurance', description: 'Insurance claims' },
-    ],
-    claimStatus: [
-      { code: 'JOB_ORDER_CREATED', label: 'Job Order Created' },
-      { code: 'CUSTOMER_SUBMITTED_FORM', label: 'Customer Submitted Form' },
-      { code: 'DIAGNOSIS_IN_PROGRESS', label: 'Diagnosis In Progress' },
-      { code: 'REPAIR_ONGOING', label: 'Repair Ongoing' },
-      { code: 'QUALITY_CONTROL', label: 'Quality Control' },
-      { code: 'VEHICLE_READY', label: 'Vehicle Ready' },
-      { code: 'VEHICLE_DELIVERED', label: 'Vehicle Delivered' },
-      { code: 'CANCELLED', label: 'Cancelled' },
-    ],
-    warrantyType: [
-      { code: 'LOAN_WARRANTY', label: 'Loan Warranty' },
-      { code: 'CASH_WARRANTY', label: 'Cash Warranty' },
-    ],
-  };
+  /** Vehicle search behind the new-claim picker. Upstream (Acquire/loan service) replaces the store later. */
+  searchCars(query: CarSearchQueryDto) {
+    const settings = this.configs.getSettings();
+    const rows = this.store.cars
+      .map((car) => ({ car, customer: this.store.customers.find((c) => c.id === car.customerId)! }))
+      .filter(({ car, customer }) => {
+        if (!query.search) return true;
+        const fields: Record<string, unknown> = {
+          VIN: car.vin, CAR_ID: car.id, PLATE_NUMBER: car.plateNumber, WARRANTY_ID: car.warrantyId,
+          CUSTOMER_NAME: customer.name, CUSTOMER_EMAIL: customer.email, CUSTOMER_PHONE: customer.phone,
+        };
+        return query.searchType
+          ? includesText(fields[query.searchType], query.search)
+          : Object.values(fields).some((value) => includesText(value, query.search!));
+      })
+      .map(({ car, customer }) => ({
+        value: car.id,
+        label: `${car.year} ${car.make} ${car.model} · ${car.plateNumber}`,
+        email: customer.email,
+        car,
+        customer,
+        eligibility: carEligibility(this.store, settings, car.id),
+      }));
+    return paginate(rows, query.page, query.limit);
+  }
 
-  private mockCountries: CountryDto[] = [
-    { code: 'NG', name: 'Nigeria', currency: 'NGN', callingCode: '+234' },
-    { code: 'KE', name: 'Kenya', currency: 'KES', callingCode: '+254' },
-    { code: 'GH', name: 'Ghana', currency: 'GHS', callingCode: '+233' },
-  ];
+  enums() {
+    return ENUMS;
+  }
 
-  private mockVendors: VendorDto[] = [
-    {
-      id: 'v-101',
-      name: 'Autochek Flagship Workshop Ikeja',
-      country: 'NG',
-      city: 'Lagos',
-      active: true,
-    },
-    {
-      id: 'v-102',
-      name: 'Autochek Workshop Nairobi',
-      country: 'KE',
-      city: 'Nairobi',
-      active: true,
-    },
-  ];
+  countries() {
+    return this.store.countries.map((country) => ({ ...country, flag: flag(country.code) }));
+  }
 
-  async searchCars(searchType?: string, search?: string): Promise<{ data: CarLookupDto[]; meta: any }> {
-    let filtered = this.mockCars;
-    if (search && searchType) {
-      filtered = this.mockCars.filter((car) => {
-        if (searchType === 'VIN') return car.car.vin.includes(search);
-        if (searchType === 'CAR_ID') return car.car.id.includes(search);
-        if (searchType === 'PLATE_NUMBER') return car.car.plateNumber.includes(search);
-        if (searchType === 'CUSTOMER_NAME') return car.customer.name.toLowerCase().includes(search.toLowerCase());
-        if (searchType === 'CUSTOMER_EMAIL') return car.customer.email.toLowerCase().includes(search.toLowerCase());
-        if (searchType === 'CUSTOMER_PHONE') return car.customer.phone.includes(search);
-        return true;
-      });
+  vendors(query: VendorsQueryDto) {
+    return this.store.vendors.filter((vendor) => {
+      if (!query.includeInactive && vendor.active === false) return false;
+      if (query.country && vendor.country !== query.country) return false;
+      if (query.city && !includesText(vendor.city, query.city)) return false;
+      if (query.category && vendor.category !== query.category) return false;
+      return !query.search || includesText(vendor.name, query.search);
+    });
+  }
+
+  states(query: StatesQueryDto) {
+    return (STATES[query.country ?? 'NG'] ?? []).map(({ code, name }) => ({ code, name }));
+  }
+
+  cities(query: CitiesQueryDto) {
+    const states = STATES[query.country ?? 'NG'] ?? [];
+    return states
+      .filter((state) => !query.state || state.code === query.state)
+      .flatMap((state) => state.cities.map((city) => ({ ...city, state: state.code })));
+  }
+
+  /** Cash warranties are found by warranty reference or VIN; everything else by car/customer fields. */
+  searchTypes(query: SearchTypesQueryDto) {
+    const label = (value: string, text: string) => ({ value, label: `Search by ${text}` });
+    if (query.claimType === 'WARRANTY' && query.warrantyType === 'CASH_WARRANTY') {
+      return [label('WARRANTY_ID', 'Warranty ID'), label('VIN', 'VIN')];
     }
-    return {
-      data: filtered,
-      meta: { total: filtered.length, page: 1, limit: 8 },
-    };
-  }
-
-  async getEnums(): Promise<Record<string, EnumDto[]>> {
-    return this.mockEnums;
-  }
-
-  async getCountries(): Promise<CountryDto[]> {
-    return this.mockCountries;
-  }
-
-  async getVendors(): Promise<VendorDto[]> {
-    return this.mockVendors;
-  }
-
-  /**
-   * Search-by options for the claim-create car picker. A cash warranty is
-   * looked up by warranty reference or VIN; everything else searches the car
-   * and customer fields — mirrors the Claims UI's claimOptions.ts.
-   */
-  getSearchTypes(
-    claimType?: string,
-    warrantyType?: string,
-  ): { value: string; label: string }[] {
-    const isCashWarranty =
-      claimType === 'WARRANTY' && warrantyType === 'CASH_WARRANTY';
-
-    if (isCashWarranty) {
-      return [
-        { value: 'WARRANTY_ID', label: 'Search by Warranty ID' },
-        { value: 'VIN', label: 'Search by VIN' },
-      ];
-    }
-
     return [
-      { value: 'VIN', label: 'Search by VIN' },
-      { value: 'CAR_ID', label: 'Search by Car ID' },
-      { value: 'PLATE_NUMBER', label: 'Search by Plate Number' },
-      { value: 'CUSTOMER_NAME', label: 'Search by Customer Name' },
-      { value: 'CUSTOMER_EMAIL', label: 'Search by Customer Email' },
-      { value: 'CUSTOMER_PHONE', label: 'Search by Customer Phone' },
+      label('VIN', 'VIN'), label('CAR_ID', 'Car ID'), label('PLATE_NUMBER', 'Plate Number'),
+      label('CUSTOMER_NAME', 'Customer Name'), label('CUSTOMER_EMAIL', 'Customer Email'), label('CUSTOMER_PHONE', 'Customer Phone'),
     ];
   }
 }

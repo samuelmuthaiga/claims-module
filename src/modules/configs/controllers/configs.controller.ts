@@ -1,95 +1,97 @@
-import {
-  Body,
-  Controller,
-  Get,
-  Param,
-  Patch,
-  Post,
-  Query,
-} from '@nestjs/common';
-import {
-  ApiOperation,
-  ApiQuery,
-  ApiResponse,
-  ApiTags,
-} from '@nestjs/swagger';
-import { ConfigsService } from '../services/configs.service';
+import { Body, Controller, Get, Headers, HttpCode, Param, Patch, Post, Query, Res } from '@nestjs/common';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Response } from 'express';
+import { Permission } from '../../../auth/constants/permissions';
+import { CurrentUser } from '../../../auth/decorators/current-user.decorator';
+import { RequirePermissions } from '../../../auth/decorators/require-permissions.decorator';
+import { AuthUser } from '../../../auth/interfaces/auth-user.interface';
+import { ApiAuth } from '../../../common/decorators/api-auth.decorator';
+import { ApiOkEnvelope } from '../../../common/decorators/api-response.decorator';
+import { ConfigBootstrapDto, ConfigResponseDto } from '../dto/config.dto';
+import { BootstrapQueryDto, GetConfigQueryDto, ListConfigsQueryDto } from '../dto/config-query.dto';
 import { CreateConfigDto } from '../dto/create-config.dto';
+import { SubmitConfigValuesDto, SubmitConfigValuesResponseDto } from '../dto/submit-config-values.dto';
 import { UpdateConfigDto } from '../dto/update-config.dto';
-import { FormConfigResponseDto } from '../dto/config.dto';
-import {
-  SubmitConfigValuesDto,
-  SubmitConfigValuesResponseDto,
-} from '../dto/submit-config-values.dto';
-import { ResponseDto } from '../../../common/dto/response.dto';
+import { ConfigsService } from '../services/configs.service';
 
 @ApiTags('configs')
+@ApiAuth()
 @Controller('v1/configs')
 export class ConfigsController {
-  constructor(private readonly configsService: ConfigsService) {}
+  constructor(private readonly configs: ConfigsService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List form configurations' })
-  @ApiQuery({ name: 'domain', required: false, example: 'claims' })
-  @ApiResponse({ status: 200, description: 'Returns form config templates' })
-  async findAll(
-    @Query('domain') domain?: string,
-  ): Promise<ResponseDto<FormConfigResponseDto[]>> {
-    return { data: await this.configsService.findAll(domain) };
+  @RequirePermissions(Permission.CONFIGS_READ)
+  @ApiOperation({ summary: 'List UI configurations (forms, filters, tables, workflow, settings)' })
+  @ApiOkEnvelope('Configs', ConfigResponseDto, true)
+  list(@Query() query: ListConfigsQueryDto) {
+    return this.configs.list(query);
   }
 
-  @Post()
-  @ApiOperation({ summary: 'Create a form config (validates metaData schema)' })
-  @ApiResponse({ status: 201, description: 'Config created' })
-  @ApiResponse({ status: 400, description: 'Invalid meta_data schema or duplicate key' })
-  async create(
-    @Body() dto: CreateConfigDto,
-  ): Promise<ResponseDto<FormConfigResponseDto>> {
-    return { data: await this.configsService.create(dto) };
+  @Get('bootstrap')
+  @RequirePermissions(Permission.CONFIGS_READ)
+  @ApiOperation({
+    summary: 'Every active config in one call, with an etag',
+    description: 'Load once at login. Send the etag back as If-None-Match to get 304 when nothing changed. `GET /v1/auth/me` returns the same etag as `configEtag`.',
+  })
+  @ApiOkEnvelope('Config bundle', ConfigBootstrapDto)
+  bootstrap(
+    @Query() query: BootstrapQueryDto,
+    @Headers('if-none-match') ifNoneMatch: string | undefined,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const bundle = this.configs.bootstrap(query.country);
+    res.setHeader('ETag', `"${bundle.etag}"`);
+    res.setHeader('Cache-Control', 'private, no-cache');
+    if (ifNoneMatch?.replace(/"/g, '') === bundle.etag) {
+      res.status(304);
+      return undefined;
+    }
+    return bundle;
   }
 
   @Get(':key')
+  @RequirePermissions(Permission.CONFIGS_READ)
   @ApiOperation({
-    summary:
-      'Get a form config by key. Pass entity context as query params to hydrate {{context.*}} placeholders (e.g. ?entityType=claim&entityId=123&country=NG).',
+    summary: 'Get one config by key',
+    description: 'Pass `entityType` + `entityId` (e.g. claim/1024) to receive the hydrated `context` and server-computed `initialValues`.',
   })
-  @ApiResponse({ status: 200, description: 'Returns the form config' })
-  @ApiResponse({ status: 404, description: 'Config not found' })
-  async findByKey(
-    @Param('key') key: string,
-    @Query() context: Record<string, unknown>,
-  ): Promise<ResponseDto<FormConfigResponseDto>> {
-    return { data: await this.configsService.findByKey(key, context) };
+  @ApiOkEnvelope('Config', ConfigResponseDto)
+  get(@Param('key') key: string, @Query() query: GetConfigQueryDto) {
+    return this.configs.get(key, query);
+  }
+
+  @Post()
+  @RequirePermissions(Permission.CONFIGS_MANAGE)
+  @ApiOperation({ summary: 'Create a config (schema is validated per type)' })
+  @ApiOkEnvelope('Config created', ConfigResponseDto)
+  create(@Body() dto: CreateConfigDto, @CurrentUser() user: AuthUser) {
+    return this.configs.create(dto, user);
   }
 
   @Patch(':key')
-  @ApiOperation({ summary: 'Update a form config (validates metaData schema)' })
-  @ApiResponse({ status: 200, description: 'Config updated' })
-  @ApiResponse({ status: 400, description: 'Invalid meta_data schema' })
-  @ApiResponse({ status: 404, description: 'Config not found' })
-  async update(
+  @RequirePermissions(Permission.CONFIGS_MANAGE)
+  @ApiOperation({ summary: 'Update a config; bumps its version and etag' })
+  @ApiOkEnvelope('Config updated', ConfigResponseDto)
+  update(
     @Param('key') key: string,
     @Body() dto: UpdateConfigDto,
-  ): Promise<ResponseDto<FormConfigResponseDto>> {
-    return { data: await this.configsService.update(key, dto) };
+    @Query('country') country: string | undefined,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.configs.update(key, dto, country, user);
   }
 
   @Post(':key/submit')
+  @HttpCode(200)
+  @RequirePermissions(Permission.CONFIGS_READ)
   @ApiOperation({
-    summary:
-      'Validate submitted form values against the config. Returns { ok, errors[], metaData } — errors are keyed by field so the UI can map them directly onto the form.',
+    summary: 'Validate form values against a config (dry run)',
+    description: 'Returns `{ ok, errors[{key,message}], metaData }`. Errors are keyed by field so they map straight onto the form; repeatable groups use `lineItems.0.quantity`-style keys.',
   })
-  @ApiResponse({ status: 200, description: 'Validation result' })
-  async submitValues(
-    @Param('key') key: string,
-    @Body() dto: SubmitConfigValuesDto,
-  ): Promise<ResponseDto<SubmitConfigValuesResponseDto>> {
-    return {
-      data: await this.configsService.submitValues(
-        key,
-        dto.values,
-        dto.context,
-      ),
-    };
+  @ApiOkEnvelope('Validation result', SubmitConfigValuesResponseDto)
+  submit(@Param('key') key: string, @Body() dto: SubmitConfigValuesDto) {
+    const { ok, errors, metaData } = this.configs.validate(key, dto.values, dto.context ?? {});
+    return { ok, errors, metaData };
   }
 }
