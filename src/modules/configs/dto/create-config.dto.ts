@@ -1,82 +1,40 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
-  IsBoolean,
-  IsNotEmpty,
-  IsObject,
-  IsOptional,
-  IsString,
-  MaxLength,
+  IsArray, IsBoolean, IsIn, IsNotEmpty, IsObject, IsOptional, IsString, Matches, MaxLength,
 } from 'class-validator';
+import { CONFIG_TYPES } from '../types/config.types';
 
 export class CreateConfigDto {
-  @ApiProperty({
-    example: 'quote-upload',
-    description: 'Unique form key the UI uses to fetch this config',
-  })
-  @IsString()
-  @IsNotEmpty()
-  @MaxLength(120)
+  @ApiProperty({ example: 'quote-upload' })
+  @IsString() @IsNotEmpty() @MaxLength(120)
+  @Matches(/^[a-z0-9][a-z0-9-]*$/, { message: 'key must be lowercase letters, numbers and hyphens' })
   key!: string;
 
+  @ApiProperty({ enum: CONFIG_TYPES })
+  @IsIn(CONFIG_TYPES as unknown as string[])
+  type!: (typeof CONFIG_TYPES)[number];
+
   @ApiProperty({ example: 'Upload Repair Quote' })
-  @IsString()
-  @IsNotEmpty()
-  @MaxLength(255)
+  @IsString() @IsNotEmpty() @MaxLength(255)
   title!: string;
 
-  @ApiPropertyOptional({
-    example: 'Submit the diagnosis and the priced quote for claims admin review',
-  })
-  @IsOptional()
-  @IsString()
-  description?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() description?: string;
 
   @ApiPropertyOptional({ example: 'claims', default: 'claims' })
-  @IsOptional()
-  @IsString()
+  @IsOptional() @IsString() @MaxLength(60)
   domain?: string;
 
-  @ApiProperty({
-    description:
-      'Form schema. Either { fields: [...] } for a flat form or { sections: [{ key, label, fields: [...] }] } for a sectioned form. Field shape follows Fleetzen: key, type, label, required, required_if, options, options_source, validation, auto_populate, etc.',
-    example: {
-      title: 'Upload Repair Quote',
-      sections: [
-        {
-          key: 'diagnosis',
-          label: 'Diagnosis',
-          fields: [
-            {
-              key: 'diagnosisReportUrl',
-              type: 'file',
-              label: 'Diagnosis Report',
-              required: true,
-            },
-          ],
-        },
-      ],
-    },
-  })
+  @ApiPropertyOptional({ example: '*', default: '*', description: "Country code, or '*' for all" })
+  @IsOptional() @IsString() @MaxLength(8)
+  country?: string;
+
+  @ApiProperty({ description: 'Schema for the given config type (validated server-side)' })
   @IsObject()
   metaData!: Record<string, unknown>;
 
-  @ApiPropertyOptional({
-    description: 'Action buttons/submit behaviour for the form',
-    example: [
-      {
-        key: 'submit',
-        label: 'Upload Quote',
-        style: 'primary',
-        endpoint: '/api/v1/claims/:claimId/quotes',
-        method: 'POST',
-      },
-    ],
-  })
-  @IsOptional()
+  @ApiPropertyOptional({ type: 'array', items: { type: 'object' } })
+  @IsOptional() @IsArray()
   actions?: Record<string, unknown>[];
 
-  @ApiPropertyOptional({ example: true, default: true })
-  @IsOptional()
-  @IsBoolean()
-  isActive?: boolean;
+  @ApiPropertyOptional({ default: true }) @IsOptional() @IsBoolean() isActive?: boolean;
 }

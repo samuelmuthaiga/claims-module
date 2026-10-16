@@ -1,44 +1,31 @@
-import { IsEnum, IsString, IsOptional, IsArray, MinLength, MaxLength } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Transform } from 'class-transformer';
+import { IsIn, IsNotEmpty, IsOptional, IsString, Length, Matches, ValidateIf } from 'class-validator';
+import { CLAIM_TYPES, ClaimType, REQUEST_CHANNELS, RequestChannel, WARRANTY_TYPES, WarrantyType } from '../../../domain/claim.types';
 
-export enum ClaimType {
-  WARRANTY = 'WARRANTY',
-  REPAIRS = 'REPAIRS',
-  INSURANCE = 'INSURANCE',
-}
-
-export enum WarrantyType {
-  LOAN_WARRANTY = 'LOAN_WARRANTY',
-  CASH_WARRANTY = 'CASH_WARRANTY',
-}
-
-export enum RequestChannel {
-  PHONE_CALL = 'PHONE_CALL',
-  EMAIL = 'EMAIL',
-}
+const trim = () => Transform(({ value }) => (typeof value === 'string' ? value.trim() : value));
 
 export class CreateClaimDto {
-  @IsEnum(ClaimType)
-  claimType!: ClaimType;
+  @ApiProperty({ enum: CLAIM_TYPES }) @IsIn(CLAIM_TYPES as unknown as string[]) claimType!: ClaimType;
 
-  @IsEnum(WarrantyType)
-  @IsOptional()
+  @ApiPropertyOptional({ enum: WARRANTY_TYPES, description: 'Required when claimType is WARRANTY' })
+  @ValidateIf((o: CreateClaimDto) => o.claimType === 'WARRANTY')
+  @IsIn(WARRANTY_TYPES as unknown as string[])
   warrantyType?: WarrantyType;
 
-  @IsString()
-  carId!: string;
+  @ApiProperty({ example: 'car-991' }) @IsString() @IsNotEmpty() carId!: string;
 
-  @IsString()
+  @ApiProperty({ example: '+2348012345678', description: 'E.164' })
+  @trim() @Matches(/^\+[1-9]\d{7,14}$/, { message: 'customerPhone must be in E.164 format, e.g. +2348012345678' })
   customerPhone!: string;
 
-  @IsEnum(RequestChannel)
-  requestChannel!: RequestChannel;
+  @ApiProperty({ enum: REQUEST_CHANNELS }) @IsIn(REQUEST_CHANNELS as unknown as string[]) requestChannel!: RequestChannel;
 
-  @IsString()
-  @MinLength(10)
-  @MaxLength(4000)
-  initialDetails!: string;
+  @ApiProperty({ minLength: 10, maxLength: 4000 }) @trim() @Length(10, 4000) initialDetails!: string;
 
-  @IsString()
-  @IsOptional()
-  supportingFileId?: string;
+  @ApiPropertyOptional({ description: 'URL of the uploaded photo/document (current UI)' })
+  @IsOptional() @IsString() supportingDocumentUrl?: string;
+
+  @ApiPropertyOptional({ description: 'Confirmed file id (API spec); alternative to supportingDocumentUrl' })
+  @IsOptional() @IsString() supportingFileId?: string;
 }

@@ -1,37 +1,27 @@
+import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
-import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { AppModule } from './app.module';
+import { setupApp, setupSwagger } from './app.setup';
+import { AppConfigService } from './config/app-config.service';
 
-async function bootstrap() {
+async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule);
+  const config = app.get(AppConfigService).getConfig();
+  const logger = new Logger('Bootstrap');
 
-  // Enable CORS
-  app.enableCors({
-    origin: '*',
-    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
-    credentials: true,
-  });
+  setupApp(app);
+  setupSwagger(app);
+  app.enableShutdownHooks();
 
-  // Global prefix
-  app.setGlobalPrefix('api');
+  if (config.app.disableAuth) {
+    logger.warn(`DISABLE_AUTH is on: every request runs as ${config.app.disableAuthUserId} [${config.app.disableAuthUserRoles.join(', ')}]`);
+  }
+  if (config.database.enabled) {
+    logger.warn('DB_ENABLED=true but services still read/write the in-memory store until the repository adapters are implemented');
+  }
 
-  const config = new DocumentBuilder()
-    .setTitle('Claims Service API')
-    .setDescription('Backend API for Claims Portal')
-    .setVersion('1.0')
-    .addBearerAuth()
-    .addTag('claims', 'Claims management endpoints')
-    .addTag('lookups', 'Lookup endpoints')
-    .addTag('approvals', 'Approval management endpoints')
-    .addTag('payments', 'Payment management endpoints')
-    .addTag('auth', 'Authentication endpoints')
-    .build();
-
-  const document = SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup('docs', app, document);
-
-  await app.listen(3000);
-  console.log(`Application is running on: http://localhost:3000`);
-  console.log(`Swagger documentation: http://localhost:3000/docs`);
+  await app.listen(config.app.port);
+  logger.log(`${config.app.serviceName} running on port ${config.app.port} (${config.app.env}); docs at /docs`);
 }
+
 bootstrap();

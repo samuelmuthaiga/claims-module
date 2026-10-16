@@ -1,12 +1,13 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
-import { DB_ENABLED } from '../../config/database.config';
+import { AuditLogsModule } from '../audit-logs/audit-logs.module';
+import { ClaimWorkflowModule } from '../claim-workflow/claim-workflow.module';
+import { ConfigsModule } from '../configs/configs.module';
+import { PaymentsModule } from '../payments/payments.module';
 import { ApprovalsController } from './controllers/approvals.controller';
 import { ApprovalsService } from './services/approvals.service';
-import { Approval } from './entities/approval.entity';
 
 @Module({
-  imports: [TypeOrmModule.forFeature(DB_ENABLED ? [Approval] : [])],
+  imports: [ClaimWorkflowModule, PaymentsModule, ConfigsModule, AuditLogsModule],
   controllers: [ApprovalsController],
   providers: [ApprovalsService],
   exports: [ApprovalsService],

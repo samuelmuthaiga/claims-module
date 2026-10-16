@@ -1,26 +1,8 @@
-import { IsString, IsEmail, IsOptional } from 'class-validator';
+import { ApiProperty } from '@nestjs/swagger';
+import { IsNotEmpty, IsString } from 'class-validator';
 
 export class SsoLoginDto {
-  @IsString()
+  @ApiProperty({ description: 'Token issued by the identity provider', example: 'sso_token_from_identity_provider' })
+  @IsString() @IsNotEmpty()
   token!: string;
-
-  @IsString()
-  @IsOptional()
-  provider?: string;
-}
-
-export class UserDto {
-  id!: string;
-  email!: string;
-  name!: string;
-  role!: string;
-  country!: string;
-  permissions!: string[];
-}
-
-export class LoginResponseDto {
-  accessToken!: string;
-  refreshToken!: string;
-  expiresIn!: number;
-  user!: UserDto;
 }
